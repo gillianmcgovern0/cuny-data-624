@@ -1,0 +1,406 @@
+---
+title: "DATA 624 Project 1 Part C"
+author: "Gillian McGovern"
+date: "2025-03-31"
+output: html_document
+---
+
+### Part C – BONUS, optional (part or all), Waterflow_Pipe1.xlsx and Waterflow_Pipe2.xlsx
+
+Part C consists of two data sets. These are simple 2 columns sets, however they have different time stamps.  Your optional assignment is to time-base sequence the data and aggregate based on hour (example of what this looks like, follows).  Note for multiple recordings within an hour, take the mean. Then to determine if the data is stationary and can it be forecast.  If so, provide a week forward forecast and present results via Rpubs and .rmd and the forecast in an Excel readable file.   
+
+### Load the Libraries
+
+```{r}
+library(fpp3)
+library(lubridate)
+library(seasonal)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+```
+
+### Read the Data
+
+```{r}
+pipe1 <- read_csv("https://raw.githubusercontent.com/gillianmcgovern0/cuny-data-624/refs/heads/main/Waterflow_Pipe1(Waterflow_Pipe1).csv")
+pipe2 <- read_csv("https://raw.githubusercontent.com/gillianmcgovern0/cuny-data-624/refs/heads/main/Waterflow_Pipe2(Waterflow_Pipe2).csv")
+```
+
+Now let's clean up the data so we can create a time series:
+
+```{r}
+# Make sure time is in ymd_hms format
+pipe1_final <- pipe1 |>
+  separate(`Date Time`, c("Date", "Time"), " ", extra = "merge") |>
+  mutate(Time = format(as.POSIXct(Time,format='%I:%M %p'),format="%H:%M:%S")) |>
+  separate(Date, c("Month", "Day", "Year"), "/") |>
+  unite("Date", c(Year, Month, Day), sep="-") |> # use correct format
+  unite("Date Time", Date:Time, sep=" ") |>
+  mutate(time = ymd_hms(`Date Time`)) |> # convert to date type
+  group_by(time=floor_date(as_datetime(time), '1 hour')) |> # group by hour
+  summarize(mean_water_flow = mean(WaterFlow)) |> # use the mean
+  as_tsibble(index = time)
+head(pipe1_final)
+
+pipe2_final <- pipe2 |>
+  separate(`Date Time`, c("Date", "Time"), " ", extra = "merge") |>
+  mutate(Time = format(as.POSIXct(Time,format='%I:%M %p'),format="%H:%M:%S")) |>
+  separate(Date, c("Month", "Day", "Year"), "/") |>
+  unite("Date", c(Year, Month, Day), sep="-") |>
+  unite("Date Time", Date:Time, sep=" ") |>
+  mutate(time = ymd_hms(`Date Time`)) |>
+  group_by(time=floor_date(as_datetime(time), '1 hour')) |>
+  summarize(mean_water_flow = mean(WaterFlow)) |>
+  as_tsibble(index = time)
+head(pipe2_final)
+```
+
+### Pipe 1
+
+##### Understand the Original Data
+
+Let's take a look at the original data for pipe 1:
+
+```{r}
+autoplot(pipe1_final, mean_water_flow)
+```
+
+It's a bit hard to see any seasonality here. There seems to be no trend occurring as well as the graph is pretty horizontal. Variance does seem to change a bit over time. There does not seem to be any major outliers.
+
+Since you could pick any section of this graph and it would probably look the same as the rest, this data seems stationary.
+
+Let's double check if a box cox transformation will help variance:
+
+```{r}
+lambda_pipe1_final<- pipe1_final |>
+  features(mean_water_flow, features = guerrero) |>
+  pull(lambda_guerrero)
+lambda_pipe1_final
+
+pipe1_final |>
+  autoplot(box_cox(mean_water_flow, lambda_pipe1_final))
+```
+
+This does not look like it changed the variance too much, which makes sense since lamba is close to 1. Let's choose not to make a transformation then.
+
+Let's next deal with missing data via interpolation:
+
+```{r}
+pipe1_final_miss <- pipe1_final |>
+  # Replace with missing values
+  fill_gaps()
+
+pipe1_final_fill <- pipe1_final_miss |>
+  # Fit ARIMA model to the data containing missing values
+  model(ARIMA(mean_water_flow)) |>
+  interpolate(pipe1_final_miss)
+
+autoplot(pipe1_final_fill, mean_water_flow)
+```
+
+This interpolation does not look accurate to me. The graph looks completely different now. Since we're already using the mean for each hour, let's take the mean of the previous hour's mean and future hour's mean for the NA values:
+
+```{r}
+# Find missing dates
+pipe1_final_miss |>
+  filter(is.na(mean_water_flow))
+
+# Take the mean of the latest and future water flow values
+mean1 <- mean(c(pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-10-27 16:00:00")], pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-10-27 18:00:00")]))
+mean2 <- mean(c(pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-10-27 23:00:00")], pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-10-28 01:00:00")]))
+mean3 <- mean(c(pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-11-01 04:00:00")], pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-11-01 06:00:00")]))
+mean4 <- mean(c(pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-11-01 08:00:00")], pipe1_final$mean_water_flow[pipe1_final$time == ymd_hms("2015-11-01 10:00:00")]))
+
+means <- c(mean1, mean2, mean3, mean4)
+
+pipe1_missing_only <- pipe1_final_miss |>
+  filter(is.na(mean_water_flow))
+pipe1_missing_only$mean_water_flow <- means
+
+# Add the missing dates with the new values to the original time series
+pipe1_final_fill <- dplyr::bind_rows(pipe1_final, pipe1_missing_only)
+autoplot(pipe1_final_fill, mean_water_flow)
+```
+
+This graph looks way better than the previous one. It now doesn't look like we have major outliers.
+
+Let's now double check any seasonality:
+
+```{r}
+gg_season(pipe1_final_fill, mean_water_flow)
+
+pipe1_final_fill |> 
+  gg_season(mean_water_flow, period = "day") +
+  labs(title="Daily")
+
+pipe1_final_fill |> 
+  gg_season(mean_water_flow, period = "week") +
+  labs(title="Weekly")
+
+pipe1_final_fill |> 
+  gg_season(mean_water_flow, period = "month") +
+  labs(title="Monthly")
+
+dcmp <- pipe1_final_fill |>
+  model(stl = STL(mean_water_flow))
+components(dcmp) |> autoplot()
+```
+
+All of the `gg_season` graphs do not show any seasonality. The STL decomposition shows there could be some seasonality where a period is a day, but this does not look very consistent.
+
+Let's now look at the ACF and PACF:
+
+```{r}
+pipe1_final_fill |>
+  gg_tsdisplay(mean_water_flow, plot_type='partial', lag_max=70)
+```
+
+There are not many significant spikes here. Lag 28 looks close, but it doesn't look like it goes above the dotted line. Hence this looks like white noise and this data is stationary.
+
+Since there isn't a significant spike in the ACF or PACF, that would make a possible model ARIMA(0,0,0).
+
+Let's confirm no differences need to be made via unit root test:
+
+```{r}
+pipe1_final_fill |>
+  features(mean_water_flow, unitroot_ndiffs)
+
+# seasonal difference
+pipe1_final_fill |>
+  features(mean_water_flow, unitroot_nsdiffs)
+```
+
+This came back 0 for both non-seasonal and seasonal meaning we don't need to take any difference, the data is already stationary.
+
+### Find a Model
+
+Let's look at the ARIMA models since this data looks stationary:
+
+```{r}
+fit_pipe1_final_fill <- pipe1_final_fill |>
+  model(
+    arima000 = ARIMA(mean_water_flow ~ pdq(0,0,0)),
+    stepwise = ARIMA(mean_water_flow),
+    search = ARIMA(mean_water_flow, stepwise = FALSE)
+  )
+fit_pipe1_final_fill
+
+fc_pipe1_final_fill <- fit_pipe1_final_fill |> forecast(h = 168) # forecast for next week
+
+fc_pipe1_final_fill |>
+  autoplot(pipe1_final_fill, level = NULL) +
+  guides(colour = guide_legend(title = "Forecast"))
+```
+
+Let's check the AICc values for each model and compare:
+
+```{r}
+glance(fit_pipe1_final_fill) |> arrange(AICc) |> select(.model:BIC)
+```
+
+ARIMA(0,0,0) is the winner here with the lowest AICc value. This model also matches the auto ARIMA model.
+
+##### Check Against ETS
+
+Let's double check ARIMA is the best model by comparing against ETS():
+
+```{r}
+pipe1_final_fill |>
+  slice(-n()) |>
+  stretch_tsibble(.init = 10) |>
+  model(
+    ETS(mean_water_flow),
+    ARIMA(mean_water_flow)
+  ) |>
+  forecast(h = 168) |>
+  accuracy(pipe1_final_fill) |>
+  select(.model, RMSE:MAPE)
+```
+
+Although ETS() comes close, ARIMA() is the winner with the lowest RMSE value of 4.282051.
+
+##### Model Evaluation
+
+Let's evaluate the model by checking for white noise:
+
+```{r}
+fit_pipe1_final_fill |>
+  select(arima000) |>
+  gg_tsresiduals()
+```
+
+Let's use a Ljung-Box test to evaluate the model using the default lag=10 for non-seasonal:
+
+```{r}
+augment(fit_pipe1_final_fill) |>
+  filter(.model=='arima000') |>
+  features(.innov, ljung_box, lag = 10, dof = 0)
+```
+The p value is greater than 0.05 so we can accept the white noise hypothesis. This is a valid forecast.
+
+##### Write Forecast to CSV
+
+```{r}
+pipe1_final_forecast <- fc_pipe1_final_fill |>
+  filter(.model=='arima000')
+write_csv(pipe1_final_forecast, "~/Downloads/pipe1-forecast.csv")
+```
+
+### Pipe 2
+
+##### Understand the Original Data
+
+Let's take a look at the original data for pipe 2:
+
+```{r}
+autoplot(pipe2_final, mean_water_flow)
+```
+
+Again, it's a bit hard to see any seasonality here. There seems to be no trend occurring as well as the graph is pretty horizontal. Variance does seem to change a bit over time, but not by much.
+
+Since you could pick any section of this graph and it would probably look the same as the rest, this data seems stationary.
+
+Let's double check if a box cox transformation will help:
+
+```{r}
+lambda_pipe2_final <- pipe2_final |>
+  features(mean_water_flow, features = guerrero) |>
+  pull(lambda_guerrero)
+lambda_pipe2_final
+
+pipe2_final |>
+  autoplot(box_cox(mean_water_flow, lambda_pipe2_final))
+```
+
+Lambda is very close to 1 and the graph does not look much different from the original, so let's not do any transformation.
+
+Let's double check any seasonality:
+
+```{r}
+gg_season(pipe2_final, mean_water_flow)
+
+pipe2_final |> 
+  gg_season(mean_water_flow, period = "day") +
+  labs(title="Daily")
+
+pipe2_final |> 
+  gg_season(mean_water_flow, period = "week") +
+  labs(title="Weekly")
+
+pipe2_final |> 
+  gg_season(mean_water_flow, period = "month") +
+  labs(title="Monthly")
+
+dcmp <- pipe2_final |>
+  model(stl = STL(mean_water_flow))
+components(dcmp) |> autoplot()
+```
+
+Looking at the `gg_season` plots, it doesn't look like there's much seasonality going on. The `STL()` decomposition shows there could be seasonality with a seasonal period of 1 day. The variation decreases and increases for this graph. This seasonality looks a bit more consistent.
+
+Let's take a look at the ACF and PACF:
+
+```{r}
+pipe2_final |>
+  gg_tsdisplay(mean_water_flow, plot_type='partial', lag_max=72)
+```
+
+There are a few more spikes for pipe 2. This data definitely looks like white noise so it must be stationary.
+
+Looking at the potential seasonal period, which is 24 hours, only lag 24 shows a significant spike in the ACF. This means a potential seasonal model could be MA(1), so that would be ARIMA(0,0,1). For the PACF, the last significant spike is also at lag 24 so that would be ARIMA(1,0,0).
+
+Then if you look at the non-seasonal lags, for the ACF and PACF, the last significant spike is at lag 18. So that would be non seasonal AR(18) or MA(18). These numbers are way too high and would make things complicated so we'll ignore these.
+
+If we don't look at seasonality, the last significant spikes would be too high for both ACF and PACF so let's ignore doing this.
+
+Let's confirm we don't need to take any differences via unit root test:
+
+```{r}
+pipe2_final |>
+  features(mean_water_flow, unitroot_ndiffs)
+
+# seasonal difference
+pipe2_final |>
+  features(mean_water_flow, unitroot_nsdiffs)
+```
+
+This came back 0 for both seasonal and non-seasonal meaning we don't need to take any difference, the data is already stationary.
+
+###### Find a Model
+
+Let's see the ARIMA models since this data is stationary:
+
+```{r}
+# ARIMA
+fit_pipe2_final<- pipe2_final |>
+  model(
+    arima000001 = ARIMA(mean_water_flow ~ pdq(0,0,0) + PDQ(0,0,1)),
+    arima000100 = ARIMA(mean_water_flow ~ pdq(0,0,0) + PDQ(1,0,0)),
+    auto = ARIMA(mean_water_flow, stepwise = FALSE, approximation = FALSE)
+  )
+fit_pipe2_final
+fc_pipe2_final <- fit_pipe2_final |> forecast(h = 168) # forecast for next week
+fc_pipe2_final
+
+fc_pipe2_final |>
+  autoplot(pipe2_final, level = NULL) +
+  guides(colour = guide_legend(title = "Forecast"))
+```
+
+Let's compare the AICc values:
+
+```{r}
+glance(fit_pipe2_final) |> arrange(AICc) |> select(.model:BIC)
+```
+
+`ARIMA(0,0,0)(1,0,0)` is the winner here with the lowest AICc value of 8386.952. This is also the auto ARIMA model.
+
+##### Double Check Against ETS
+
+Let's double check ARIMA is the best model. Using `stretch_tsibble` and `model` was taking a long time, so I chose to do a training and test set here even though we don't have a lot of data:
+
+```{r}
+train <- pipe2_final |> filter_index(. ~ "2015-11-27 01:00:00")
+fit_arima <- train |> model(ARIMA(mean_water_flow))
+report(fit_arima)
+fit_ets <- train |> model(ETS(mean_water_flow))
+report(fit_ets)
+bind_rows(
+    fit_arima |> accuracy(),
+    fit_ets |> accuracy(),
+    fit_arima |> forecast(h = 159) |> accuracy(pipe2_final),
+    fit_ets |> forecast(h = 159) |> accuracy(pipe2_final)
+  ) |>
+  select(-ME, -MPE, -ACF1)
+```
+
+Although ETS() comes close, ARIMA() is the winner with the lowest RMSE value.
+
+##### Model Evaluation
+
+Let's evaluate the model for white noise:
+
+```{r}
+fit_pipe2_final |>
+  select(arima000100) |>
+  gg_tsresiduals()
+```
+
+Since there is seasonality, lag is 2 * m which is 2 * 24 which is 48. DOF is 1.
+
+```{r}
+augment(fit_pipe2_final) |>
+  filter(.model=='arima000100') |>
+  features(.innov, ljung_box, lag = 48, dof = 1)
+```
+
+The p value is greater than 0.05 so we accept the white noise hypothesis. This is a valid forecast.
+
+##### Write Forecast to CSV
+
+```{r}
+pipe2_final_forecast <- fc_pipe2_final |>
+  filter(.model=='arima000100')
+write_csv(pipe2_final_forecast, "~/Downloads/pipe2-forecast.csv")
+```
